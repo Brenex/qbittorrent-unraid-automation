@@ -1,4 +1,4 @@
 # requirements.txt
 requests
-qbittorrentapi
+qbittorrent-api
 python-dotenv
