@@ -166,7 +166,7 @@ except ModuleNotFoundError:
 
 
 # --- Unregistered Torrent Removal Functions ---
-def login_qbittorrent(host, username, password):
+def login_qbittorrent(host, username, password) -> bool:
     """
     Attempts to log into the qBittorrent Web UI using requests.Session.
 
@@ -175,23 +175,27 @@ def login_qbittorrent(host, username, password):
         username (str): qBittorrent username.
         password (str): qBittorrent password.
 
-    Raises:
-        Exception: If the login attempt fails.
+    Returns:
+        bool: True if login is successful, False otherwise.
     """
     logger.info("Attempting to log into qBittorrent for unregistered torrent check...")
     try:
         resp = session.post(f'{host}/api/v2/auth/login', data={'username': username, 'password': password})
         if resp.text == 'Ok.':
             logger.info("Successfully logged in to qBittorrent (requests session).")
+            return True
+        elif resp.text == 'Fails.':
+            logger.error("Login failed: Invalid username or password.")
+            return False
         else:
-            logger.error(f"Login failed: {resp.text}")
-            raise Exception(f"Login failed: {resp.text}")
+            logger.error(f"Login failed: Unexpected response from qBittorrent API: '{resp.text}'.")
+            return False
     except requests.exceptions.RequestException as e:
-        logger.error(f"Network error during login: {e}")
-        raise Exception(f"Network error during login: {e}")
+        logger.error(f"Network or connection error during qBittorrent login: {e}")
+        return False
     except Exception as e:
-        logger.error(f"An unexpected error occurred during login: {e}")
-        raise Exception(f"An unexpected error occurred during login: {e}")
+        logger.error(f"An unexpected error occurred during qBittorrent login: {e}", exc_info=True)
+        return False
 
 
 def logout_qbittorrent(host):
@@ -236,7 +240,7 @@ def delete_torrent_by_hash(qb_host: str, torrent_hash: str, torrent_name: str) -
         logger.error(f"Network error when deleting torrent '{torrent_name}': {e}")
         return False
     except Exception as e:
-        logger.error(f"An unexpected error occurred while deleting torrent '{torrent_name}': {e}")
+        logger.error(f"An unexpected error occurred while deleting torrent '{torrent_name}': {e}", exc_info=True)
         return False
 
 
@@ -269,7 +273,7 @@ def send_discord_notification_embed(
                 "title": title,
                 "description": description,
                 "color": color,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now().isoomat(),
                 "fields": fields if fields else [],
                 "footer": {
                     "text": "qBittorrent Unraid Automation Script"
@@ -310,7 +314,7 @@ def send_discord_notification_embed(
     except Exception as e:
         logger.error(f"An unexpected error occurred while sending Discord notification: {e}", exc_info=True)
     finally:
-        if 'file' in files and files['file'][1]: # Check if file was opened before trying to close
+        if 'file' in files and files['file'] and files['file'][1] and not files['file'][1].closed: # Check if file was opened and is not closed before trying to close
             files['file'][1].close() # Ensure file handle is closed
 
 
@@ -335,7 +339,7 @@ def find_and_delete_unregistered_torrents_task(qb_host: str, discord_webhook: st
         logger.critical(f"Failed to retrieve torrent info from qBittorrent: {e}")
         return {"deleted": 0, "notified_issues": 0, "system_notif_sent": False, "report_path": None}
     except Exception as e:
-        logger.critical(f"An unexpected error occurred while fetching torrents: {e}")
+        logger.critical(f"An unexpected error occurred while fetching torrents: {e}", exc_info=True)
         return {"deleted": 0, "notified_issues": 0, "system_notif_sent": False, "report_path": None}
 
     torrents.sort(key=lambda t: t['name'].lower())
@@ -357,7 +361,7 @@ def find_and_delete_unregistered_torrents_task(qb_host: str, discord_webhook: st
             logger.warning(f"Failed to get trackers for '{torrent_name}': {e}")
             continue
         except Exception as e:
-            logger.warning(f"An unexpected error occurred getting trackers for '{torrent_name}': {e}")
+            logger.warning(f"An unexpected error occurred getting trackers for '{torrent_name}': {e}", exc_info=True)
             continue
 
         for tracker in trackers:
@@ -417,7 +421,7 @@ def find_and_delete_unregistered_torrents_task(qb_host: str, discord_webhook: st
                         logger.error(f"Notify script '/usr/local/emhttp/plugins/dynamix/scripts/notify' not found. Is Unraid installed or path correct?")
                         notified_entries.append(f"Notification script not found for '{torrent_name}'.")
                     except Exception as e:
-                        logger.error(f"An unexpected error occurred while running notify script: {e}")
+                        logger.error(f"An unexpected error occurred while running notify script: {e}", exc_info=True)
                         notified_entries.append(f"Notification failed for '{torrent_name}': {e}")
                 else:
                     logger.debug(f"System notification already sent. Logging additional failing tracker issue for '{torrent_name}'.")
@@ -610,11 +614,13 @@ def run_mover_task(args) -> dict:
         logger.warning("No files found on the cache drive (or all relevant paths were ignored). Skipping mover operation.")
         return {
             "status": mover_status,
+            # Removed "output_stdout": mover_output_stdout,
             "output_stderr": mover_output_stderr,
             "paused_count": paused_torrents_count
         }
 
     # Connect to qBittorrent API for mover part
+    # We attempt connection here even if the first login succeeded, because this is a new Client instance.
     try:
         qb_client = Client(host=args.host, username=args.user, password=args.password)
         qb_client.auth_log_in()
@@ -624,6 +630,7 @@ def run_mover_task(args) -> dict:
         mover_status = "Login Failed"
         return {
             "status": mover_status,
+            # Removed "output_stdout": mover_output_stdout,
             "output_stderr": mover_output_stderr,
             "paused_count": paused_torrents_count
         }
@@ -632,6 +639,7 @@ def run_mover_task(args) -> dict:
         mover_status = "Connection Failed"
         return {
             "status": mover_status,
+            # Removed "output_stdout": mover_output_stdout,
             "output_stderr": mover_output_stderr,
             "paused_count": paused_torrents_count
         }
@@ -640,6 +648,7 @@ def run_mover_task(args) -> dict:
         mover_status = "Connection Error"
         return {
             "status": mover_status,
+            # Removed "output_stdout": mover_output_stdout,
             "output_stderr": mover_output_stderr,
             "paused_count": paused_torrents_count
         }
@@ -669,6 +678,7 @@ def run_mover_task(args) -> dict:
         mover_status = "No Torrents to Move"
         return {
             "status": mover_status,
+            # Removed "output_stdout": mover_output_stdout,
             "output_stderr": mover_output_stderr,
             "paused_count": paused_torrents_count
         }
@@ -719,6 +729,7 @@ def run_mover_task(args) -> dict:
     
     return {
         "status": mover_status,
+        # Removed "output_stdout": mover_output_stdout,
         "output_stderr": mover_output_stderr,
         "paused_count": paused_torrents_count
     }
@@ -791,56 +802,71 @@ if __name__ == "__main__":
 
     # 1. Run the unregistered torrent removal part first
     logger.info("--- Starting Unregistered Torrent Removal ---")
+    
+    # Attempt login for the first task
+    logged_in_for_unregistered_check = False
     try:
-        login_qbittorrent(args.host, args.user, args.password)
-        unregistered_summary = find_and_delete_unregistered_torrents_task(args.host, args.discord_webhook_url)
-        overall_status_message += (
-            f"**Unregistered Torrent Removal:**\n"
-            f"- Deleted: {unregistered_summary['deleted']} torrents\n"
-            f"- Other Tracker Issues: {unregistered_summary['notified_issues']} torrents\n"
-        )
-        if unregistered_summary["deleted"] > 0 or unregistered_summary["notified_issues"] > 0:
-            if notification_color != 0xFF0000: # Don't override a critical error red
-                notification_color = 0xFFA500 # Orange for warnings/minor issues
+        logged_in_for_unregistered_check = login_qbittorrent(args.host, args.user, args.password)
+        if logged_in_for_unregistered_check:
+            unregistered_summary = find_and_delete_unregistered_torrents_task(args.host, args.discord_webhook_url)
+            overall_status_message += (
+                f"**Unregistered Torrent Removal:**\n"
+                f"- Deleted: {unregistered_summary['deleted']} torrents\n"
+                f"- Other Tracker Issues: {unregistered_summary['notified_issues']} torrents\n"
+            )
+            if unregistered_summary["deleted"] > 0 or unregistered_summary["notified_issues"] > 0:
+                if notification_color != 0xFF0000: # Don't override a critical error red
+                    notification_color = 0xFFA500 # Orange for warnings/minor issues
+        else:
+            overall_status_message += "**Unregistered Torrent Removal:** Skipped due to qBittorrent login failure. Please check qBittorrent credentials or connectivity.\n"
+            notification_color = 0xFF0000 # Red for critical errors (login failure)
+            # No need to call find_and_delete_unregistered_torrents_task if login failed
     except Exception as e:
         logger.critical(f"Critical error during unregistered torrent removal: {e}", exc_info=True)
         overall_status_message += f"**Unregistered Torrent Removal:** Failed with critical error: {e}\n"
         notification_color = 0xFF0000 # Red for critical errors
     finally:
-        logout_qbittorrent(args.host) # Always attempt to log out the requests session
+        # Only try to logout if we successfully logged in
+        # This is already handled inside login_qbittorrent by session.post and session.get
+        # The session.get(f'{host}/api/v2/auth/logout') is called in logout_qbittorrent which logs out the requests session
+        pass
     logger.info("--- Finished Unregistered Torrent Removal ---")
     
     # Add a small delay between the two main operations if desired, e.g., to allow qBittorrent to settle
     time.sleep(10) 
 
-    # 2. Run the mover script part
-    logger.info("--- Starting qBittorrent Mover ---")
-    mover_summary = {}
-    try:
-        mover_summary = run_mover_task(args)
-        overall_status_message += (
-            f"\n**Unraid Mover:**\n"
-            f"- Status: {mover_summary['status']}\n"
-            f"- Paused Torrents: {mover_summary['paused_count']}\n"
-        )
-        if mover_summary['status'] not in ["Success", "No Torrents to Move", "Skipped"]:
-            notification_color = 0xFF0000 # Red if mover failed or had issues
-        elif mover_summary['status'] == "Success" and mover_summary['paused_count'] == 0:
-            if notification_color == 0x00FF00: # Only set green if no prior issues
-                notification_color = 0x00FF00
-        elif mover_summary['status'] == "Success" and mover_summary['paused_count'] > 0:
-            if notification_color == 0x00FF00: # Only set green if no prior issues
-                notification_color = 0x00FF00
-        
-        # Removed 'Mover Output (stdout)' block
-        if mover_summary['output_stderr']:
-            overall_status_message += f"**Mover Output (stderr):**\n```\n{mover_summary['output_stderr'][:1000]}...\n```\n"
+    # 2. Run the mover script part ONLY IF the initial login was successful
+    if logged_in_for_unregistered_check:
+        logger.info("--- Starting qBittorrent Mover ---")
+        mover_summary = {}
+        try:
+            mover_summary = run_mover_task(args)
+            overall_status_message += (
+                f"\n**Unraid Mover:**\n"
+                f"- Status: {mover_summary['status']}\n"
+                f"- Paused Torrents: {mover_summary['paused_count']}\n"
+            )
+            if mover_summary['status'] not in ["Success", "No Torrents to Move", "Skipped"]:
+                notification_color = 0xFF0000 # Red if mover failed or had issues
+            elif mover_summary['status'] == "Success" and notification_color != 0xFF0000:
+                # Keep original color if it was orange from torrent removal, otherwise set green
+                if mover_summary['paused_count'] > 0:
+                    notification_color = 0x00FF00
+                elif unregistered_summary["deleted"] == 0 and unregistered_summary["notified_issues"] == 0:
+                    notification_color = 0x00FF00 # All good, green
 
-    except Exception as e:
-        logger.critical(f"Critical error during qBittorrent Mover process: {e}", exc_info=True)
-        overall_status_message += f"**Unraid Mover:** Failed with critical error: {e}\n"
-        notification_color = 0xFF0000 # Red for critical errors
-    logger.info("--- Finished qBittorrent Mover ---")
+            if mover_summary['output_stderr']:
+                overall_status_message += f"**Mover Output (stderr):**\n```\n{mover_summary['output_stderr'][:1000]}...\n```\n"
+
+        except Exception as e:
+            logger.critical(f"Critical error during qBittorrent Mover process: {e}", exc_info=True)
+            overall_status_message += f"**Unraid Mover:** Failed with critical error: {e}\n"
+            notification_color = 0xFF0000 # Red for critical errors
+        logger.info("--- Finished qBittorrent Mover ---")
+    else:
+        logger.info("--- Skipping qBittorrent Mover due to prior login failure ---")
+        overall_status_message += "\n**Unraid Mover:** Skipped due to previous qBittorrent login failure.\n"
+
 
     logger.info("All automation tasks completed.")
 
