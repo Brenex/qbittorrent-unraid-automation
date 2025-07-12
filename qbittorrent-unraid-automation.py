@@ -49,8 +49,34 @@ import time  # For time-related functions
 from datetime import datetime, timedelta  # For working with dates and times
 
 # Third-party imports
-import requests  # For making HTTP requests
-from dotenv import load_dotenv  # For loading environment variables from a .env file
+try:
+    import requests  # For making HTTP requests
+except ModuleNotFoundError:
+    print(
+        'Critical Error: The "requests" library is not installed. '
+        'Please install it using the command "pip install requests". '
+        'Exiting script.'
+    )
+    sys.exit(1)
+
+try:
+    from dotenv import load_dotenv  # For loading environment variables from a .env file
+except ModuleNotFoundError:
+    print(
+        'Critical Error: The "python-dotenv" library is not installed. '
+        'Please install it using the command "pip install python-dotenv". '
+        'Exiting script.'
+    )
+    sys.exit(1)
+
+try:
+    from qbittorrentapi import APIConnectionError, Client, LoginFailed
+except ModuleNotFoundError:
+    print(
+        'Requirements Error: qbittorrent-api not installed. Please install using the command "pip install qbittorrent-api"'
+    )
+    sys.exit(1)
+
 
 # --- CONFIGURATION START ---
 # Load environment variables from .env file
@@ -71,6 +97,9 @@ DEFAULT_QB_PASSWORD = os.getenv('QB_PASSWORD', 'adminadmin') # Consider using a 
 
 # Discord Webhook URL for notifications (optional, prioritized from environment)
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '') # Replace with your Discord webhook URL if desired, or leave empty to disable
+
+# Healthchecks.io URL for monitoring (optional, prioritized from environment)
+HEALTHCHECKS_URL = os.getenv('HEALTHCHECKS_URL', '') # Your Healthchecks.io ping URL (e.g., https://hc-ping.com/YOUR_UUID)
 
 # Initialize requests session for HTTP calls (used by the unregistered torrent part)
 session = requests.Session()
@@ -153,16 +182,6 @@ def cleanup_old_logs():
 
 
 # --- LOGGING CONFIGURATION END ---
-
-
-# --- qBittorrent API Setup (for mover part) ---
-try:
-    from qbittorrentapi import APIConnectionError, Client, LoginFailed
-except ModuleNotFoundError:
-    logger.error(
-        'Requirements Error: qbittorrent-api not installed. Please install using the command "pip install qbittorrent-api"'
-    )
-    sys.exit(1)
 
 
 # --- Unregistered Torrent Removal Functions ---
@@ -273,7 +292,7 @@ def send_discord_notification_embed(
                 "title": title,
                 "description": description,
                 "color": color,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now().isoformat(), # Use isoformat for Discord timestamp
                 "fields": fields if fields else [],
                 "footer": {
                     "text": "qBittorrent Unraid Automation Script"
@@ -316,6 +335,38 @@ def send_discord_notification_embed(
     finally:
         if 'file' in files and files['file'] and files['file'][1] and not files['file'][1].closed: # Check if file was opened and is not closed before trying to close
             files['file'][1].close() # Ensure file handle is closed
+
+def ping_healthchecks_io(healthchecks_url: str, status: str = ""):
+    """
+    Pings a Healthchecks.io URL to report script status.
+
+    Args:
+        healthchecks_url (str): The Healthchecks.io ping URL.
+        status (str, optional): Can be "start", "fail", or empty for success.
+                                "https://hc-ping.com/YOUR_UUID/start"
+                                "https://hc-ping.com/YOUR_UUID/fail"
+                                "https://hc-ping.com/YOUR_UUID" (success)
+    """
+    if not healthchecks_url:
+        logger.debug("Healthchecks.io URL is not configured. Skipping Healthchecks.io ping.")
+        return
+
+    ping_url = healthchecks_url
+    if status == "start":
+        ping_url += "/start"
+    elif status == "fail":
+        ping_url += "/fail"
+    # For success, no suffix is needed as per Healthchecks.io documentation
+
+    logger.info(f"Pinging Healthchecks.io at: {ping_url}")
+    try:
+        response = requests.get(ping_url, timeout=10) # Set a timeout for the ping
+        response.raise_for_status() # Raise an exception for HTTP errors
+        logger.info(f"Successfully pinged Healthchecks.io ({status if status else 'success'}).")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to ping Healthchecks.io at {ping_url}: {e}")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while pinging Healthchecks.io: {e}", exc_info=True)
 
 
 def find_and_delete_unregistered_torrents_task(qb_host: str, discord_webhook: str) -> dict:
@@ -737,6 +788,9 @@ def run_mover_task(args) -> dict:
 
 if __name__ == "__main__":
     script_start_time = datetime.now() # Capture script start time
+    
+    # Initialize Healthchecks.io status for failure handling
+    healthchecks_ping_status = "success"
 
     parser = argparse.ArgumentParser(
         prog="Qbit Automation",
@@ -772,6 +826,11 @@ if __name__ == "__main__":
         help=f"Discord webhook URL for notifications (overrides default from .env or hardcoded: {DISCORD_WEBHOOK_URL}).",
         default=DISCORD_WEBHOOK_URL,
     )
+    parser.add_argument(
+        "--healthchecks-url",
+        help=f"Healthchecks.io ping URL for script monitoring (overrides default from .env or hardcoded: {HEALTHCHECKS_URL}).",
+        default=HEALTHCHECKS_URL,
+    )
 
     args = parser.parse_args()
 
@@ -788,6 +847,9 @@ if __name__ == "__main__":
     # --- Main Script Execution Flow ---
     cleanup_old_logs() # Clean up logs at the start of each run
 
+    # Ping Healthchecks.io at script start
+    ping_healthchecks_io(args.healthchecks_url, "start")
+
     # Send script started notification
     if args.discord_webhook_url:
         send_discord_notification_embed(
@@ -800,100 +862,113 @@ if __name__ == "__main__":
     overall_status_message = ""
     notification_color = 0x00FF00 # Green for success
 
-    # 1. Run the unregistered torrent removal part first
-    logger.info("--- Starting Unregistered Torrent Removal ---")
-    
-    # Attempt login for the first task
-    logged_in_for_unregistered_check = False
     try:
-        logged_in_for_unregistered_check = login_qbittorrent(args.host, args.user, args.password)
-        if logged_in_for_unregistered_check:
-            unregistered_summary = find_and_delete_unregistered_torrents_task(args.host, args.discord_webhook_url)
-            overall_status_message += (
-                f"**Unregistered Torrent Removal:**\n"
-                f"- Deleted: {unregistered_summary['deleted']} torrents\n"
-                f"- Other Tracker Issues: {unregistered_summary['notified_issues']} torrents\n"
-            )
-            if unregistered_summary["deleted"] > 0 or unregistered_summary["notified_issues"] > 0:
-                if notification_color != 0xFF0000: # Don't override a critical error red
-                    notification_color = 0xFFA500 # Orange for warnings/minor issues
-        else:
-            overall_status_message += "**Unregistered Torrent Removal:** Skipped due to qBittorrent login failure. Please check qBittorrent credentials or connectivity.\n"
-            notification_color = 0xFF0000 # Red for critical errors (login failure)
-            # No need to call find_and_delete_unregistered_torrents_task if login failed
-    except Exception as e:
-        logger.critical(f"Critical error during unregistered torrent removal: {e}", exc_info=True)
-        overall_status_message += f"**Unregistered Torrent Removal:** Failed with critical error: {e}\n"
-        notification_color = 0xFF0000 # Red for critical errors
-    finally:
-        # Only try to logout if we successfully logged in
-        # This is already handled inside login_qbittorrent by session.post and session.get
-        # The session.get(f'{host}/api/v2/auth/logout') is called in logout_qbittorrent which logs out the requests session
-        pass
-    logger.info("--- Finished Unregistered Torrent Removal ---")
-    
-    # Add a small delay between the two main operations if desired, e.g., to allow qBittorrent to settle
-    time.sleep(10) 
-
-    # 2. Run the mover script part ONLY IF the initial login was successful
-    if logged_in_for_unregistered_check:
-        logger.info("--- Starting qBittorrent Mover ---")
-        mover_summary = {}
+        # 1. Run the unregistered torrent removal part first
+        logger.info("--- Starting Unregistered Torrent Removal ---")
+        
+        # Attempt login for the first task
+        logged_in_for_unregistered_check = False
         try:
-            mover_summary = run_mover_task(args)
-            overall_status_message += (
-                f"\n**Unraid Mover:**\n"
-                f"- Status: {mover_summary['status']}\n"
-                f"- Paused Torrents: {mover_summary['paused_count']}\n"
-            )
-            if mover_summary['status'] not in ["Success", "No Torrents to Move", "Skipped"]:
-                notification_color = 0xFF0000 # Red if mover failed or had issues
-            elif mover_summary['status'] == "Success" and notification_color != 0xFF0000:
-                # Keep original color if it was orange from torrent removal, otherwise set green
-                if mover_summary['paused_count'] > 0:
-                    notification_color = 0x00FF00
-                elif unregistered_summary["deleted"] == 0 and unregistered_summary["notified_issues"] == 0:
-                    notification_color = 0x00FF00 # All good, green
-
-            if mover_summary['output_stderr']:
-                overall_status_message += f"**Mover Output (stderr):**\n```\n{mover_summary['output_stderr'][:1000]}...\n```\n"
-
+            logged_in_for_unregistered_check = login_qbittorrent(args.host, args.user, args.password)
+            if logged_in_for_unregistered_check:
+                unregistered_summary = find_and_delete_unregistered_torrents_task(args.host, args.discord_webhook_url)
+                overall_status_message += (
+                    f"**Unregistered Torrent Removal:**\n"
+                    f"- Deleted: {unregistered_summary['deleted']} torrents\n"
+                    f"- Other Tracker Issues: {unregistered_summary['notified_issues']} torrents\n"
+                )
+                if unregistered_summary["deleted"] > 0 or unregistered_summary["notified_issues"] > 0:
+                    if notification_color != 0xFF0000: # Don't override a critical error red
+                        notification_color = 0xFFA500 # Orange for warnings/minor issues
+            else:
+                overall_status_message += "**Unregistered Torrent Removal:** Skipped due to qBittorrent login failure. Please check qBittorrent credentials or connectivity.\n"
+                notification_color = 0xFF0000 # Red for critical errors (login failure)
+                healthchecks_ping_status = "fail" # Mark Healthchecks as failed
+                # No need to call find_and_delete_unregistered_torrents_task if login failed
         except Exception as e:
-            logger.critical(f"Critical error during qBittorrent Mover process: {e}", exc_info=True)
-            overall_status_message += f"**Unraid Mover:** Failed with critical error: {e}\n"
+            logger.critical(f"Critical error during unregistered torrent removal: {e}", exc_info=True)
+            overall_status_message += f"**Unregistered Torrent Removal:** Failed with critical error: {e}\n"
             notification_color = 0xFF0000 # Red for critical errors
-        logger.info("--- Finished qBittorrent Mover ---")
-    else:
-        logger.info("--- Skipping qBittorrent Mover due to prior login failure ---")
-        overall_status_message += "\n**Unraid Mover:** Skipped due to previous qBittorrent login failure.\n"
+            healthchecks_ping_status = "fail" # Mark Healthchecks as failed
+        finally:
+            # Only try to logout if we successfully logged in
+            # This is already handled inside login_qbittorrent by session.post and session.get
+            # The session.get(f'{host}/api/v2/auth/logout') is called in logout_qbittorrent which logs out the requests session
+            pass
+        logger.info("--- Finished Unregistered Torrent Removal ---")
+        
+        # Add a small delay between the two main operations if desired, e.g., to allow qBittorrent to settle
+        time.sleep(10) 
 
+        # 2. Run the mover script part ONLY IF the initial login was successful
+        if logged_in_for_unregistered_check:
+            logger.info("--- Starting qBittorrent Mover ---")
+            mover_summary = {}
+            try:
+                mover_summary = run_mover_task(args)
+                overall_status_message += (
+                    f"\n**Unraid Mover:**\n"
+                    f"- Status: {mover_summary['status']}\n"
+                    f"- Paused Torrents: {mover_summary['paused_count']}\n"
+                )
+                if mover_summary['status'] not in ["Success", "No Torrents to Move", "Skipped"]:
+                    notification_color = 0xFF0000 # Red if mover failed or had issues
+                    healthchecks_ping_status = "fail" # Mark Healthchecks as failed
+                elif mover_summary['status'] == "Success" and notification_color != 0xFF0000:
+                    # Keep original color if it was orange from torrent removal, otherwise set green
+                    if mover_summary['paused_count'] > 0:
+                        notification_color = 0x00FF00
+                    elif unregistered_summary["deleted"] == 0 and unregistered_summary["notified_issues"] == 0:
+                        notification_color = 0x00FF00 # All good, green
 
-    logger.info("All automation tasks completed.")
+                if mover_summary['output_stderr']:
+                    overall_status_message += f"**Mover Output (stderr):**\n```\n{mover_summary['output_stderr'][:1000]}...\n```\n"
 
-    # Send final Discord notification with aggregated summary
-    if args.discord_webhook_url:
-        embed_title = "qBittorrent Unraid Automation Report"
-        send_discord_notification_embed(
-            webhook_url=args.discord_webhook_url,
-            title=embed_title,
-            description=overall_status_message,
-            color=notification_color,
-            log_file_path=current_script_log_file_path # Attach the main script log
-        )
-    else:
-        logger.info("No Discord webhook URL provided. Skipping final Discord notification.")
+            except Exception as e:
+                logger.critical(f"Critical error during qBittorrent Mover process: {e}", exc_info=True)
+                overall_status_message += f"**Unraid Mover:** Failed with critical error: {e}\n"
+                notification_color = 0xFF0000 # Red for critical errors
+                healthchecks_ping_status = "fail" # Mark Healthchecks as failed
+            logger.info("--- Finished qBittorrent Mover ---")
+        else:
+            logger.info("--- Skipping qBittorrent Mover due to prior login failure ---")
+            overall_status_message += "\n**Unraid Mover:** Skipped due to previous qBittorrent login failure.\n"
 
-    script_end_time = datetime.now() # Capture script end time
-    script_duration = script_end_time - script_start_time
+    except Exception as e:
+        logger.critical(f"An unhandled critical error occurred during script execution: {e}", exc_info=True)
+        overall_status_message += f"\n**Overall Script Status:** Unhandled Critical Error: {e}\n"
+        notification_color = 0xFF0000 # Red for critical errors
+        healthchecks_ping_status = "fail" # Mark Healthchecks as failed
+    finally:
+        logger.info("All automation tasks completed.")
 
-    # Send script finished notification
-    if args.discord_webhook_url:
-        send_discord_notification_embed(
-            webhook_url=args.discord_webhook_url,
-            title="qBittorrent Unraid Automation Script Finished",
-            description=(
-                f"Script execution completed at: {script_end_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"Duration: {script_duration}"
-            ),
-            color=0x3498DB # Blue color for informational end
-        )
+        script_end_time = datetime.now() # Capture script end time
+        script_duration = script_end_time - script_start_time
+
+        # Send final Discord notification with aggregated summary
+        if args.discord_webhook_url:
+            embed_title = "qBittorrent Unraid Automation Report"
+            send_discord_notification_embed(
+                webhook_url=args.discord_webhook_url,
+                title=embed_title,
+                description=overall_status_message,
+                color=notification_color,
+                log_file_path=current_script_log_file_path # Attach the main script log
+            )
+        else:
+            logger.info("No Discord webhook URL provided. Skipping final Discord notification.")
+
+        # Send script finished notification
+        if args.discord_webhook_url:
+            send_discord_notification_embed(
+                webhook_url=args.discord_webhook_url,
+                title="qBittorrent Unraid Automation Script Finished",
+                description=(
+                    f"Script execution completed at: {script_end_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Duration: {script_duration}"
+                ),
+                color=0x3498DB # Blue color for informational end
+            )
+        
+        # Ping Healthchecks.io at script end with final status
+        ping_healthchecks_io(args.healthchecks_url, healthchecks_ping_status)
