@@ -292,7 +292,7 @@ def send_discord_notification_embed(
                 "title": title,
                 "description": description,
                 "color": color,
-                "timestamp": datetime.now().isoformat(), # Use isoformat for Discord timestamp
+                "timestamp": datetime.now().astimezone().isoformat(),
                 "fields": fields if fields else [],
                 "footer": {
                     "text": "qBittorrent Unraid Automation Script"
