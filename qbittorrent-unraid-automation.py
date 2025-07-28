@@ -662,85 +662,62 @@ def run_mover_task(args) -> dict:
     # Step 1: Build the database of all files on the cache drive (relative paths), now respecting ignore list
     all_cache_files_relative = get_all_cache_files_relative(args.cache_mount, args.ignore_cache_folders_list)
     if not all_cache_files_relative:
-        logger.warning("No files found on the cache drive (or all relevant paths were ignored). Skipping mover operation.")
-        return {
-            "status": mover_status,
-            # Removed "output_stdout": mover_output_stdout,
-            "output_stderr": mover_output_stderr,
-            "paused_count": paused_torrents_count
-        }
-
+        logger.info("No files found on the cache drive (or all relevant paths were ignored). Skipping qBittorrent-specific mover operations but will still run Unraid mover if specified.")
+        # Proceed to run the mover command even if no qBittorrent torrents are on cache.
+        # This is where the unconditional mover call comes in if the user wants it to run anyway.
+        # For now, if no torrents are on cache, we mark it as "No Torrents to Move" and proceed to mover command.
+        mover_status = "No Torrents to Move"
+    
     # Connect to qBittorrent API for mover part
     # We attempt connection here even if the first login succeeded, because this is a new Client instance.
+    qb_client = None
     try:
         qb_client = Client(host=args.host, username=args.user, password=args.password)
         qb_client.auth_log_in()
         logger.info("Successfully connected to qBittorrent API for mover operations.")
     except LoginFailed:
-        logger.error("Qbittorrent Error: Failed to login for mover. Invalid username/password.", exc_info=True)
-        mover_status = "Login Failed"
-        return {
-            "status": mover_status,
-            # Removed "output_stdout": mover_output_stdout,
-            "output_stderr": mover_output_stderr,
-            "paused_count": paused_torrents_count
-        }
+        logger.warning("Qbittorrent Error: Failed to login for mover. Invalid username/password. Mover will proceed without pausing/resuming torrents.")
+        mover_status = "Login Failed (Torrent Ops Skipped)"
     except APIConnectionError as e:
-        logger.error(f"Qbittorrent Error: Unable to connect to the client at {args.host} for mover: {e}", exc_info=True)
-        mover_status = "Connection Failed"
-        return {
-            "status": mover_status,
-            # Removed "output_stdout": mover_output_stdout,
-            "output_stderr": mover_output_stderr,
-            "paused_count": paused_torrents_count
-        }
+        logger.warning(f"Qbittorrent Error: Unable to connect to the client at {args.host} for mover: {e}. Mover will proceed without pausing/resuming torrents.")
+        mover_status = "Connection Failed (Torrent Ops Skipped)"
     except Exception as e:
-        logger.error(f"An unexpected error occurred during qBittorrent connection for mover: {e}", exc_info=True)
-        mover_status = "Connection Error"
-        return {
-            "status": mover_status,
-            # Removed "output_stdout": mover_output_stdout,
-            "output_stderr": mover_output_stderr,
-            "paused_count": paused_torrents_count
-        }
+        logger.warning(f"An unexpected error occurred during qBittorrent connection for mover: {e}. Mover will proceed without pausing/resuming torrents.", exc_info=True)
+        mover_status = "Connection Error (Torrent Ops Skipped)"
 
+    torrents_to_pause = []
+    if qb_client: # Only attempt torrent-related operations if qBittorrent connection was successful
+        # Step 2: Get torrents from qBittorrent based on status filter
+        status_filters_list = [s.strip() for s in args.status_filter.split(',') if s.strip()]
 
-    # Step 2: Get torrents from qBittorrent based on status filter
-    status_filters_list = [s.strip() for s in args.status_filter.split(',') if s.strip()]
+        initial_torrent_list = []
+        if "all" in [s.lower() for s in status_filters_list]:
+            logger.info("Fetching all torrents from qBittorrent (status filter 'all' specified).")
+            initial_torrent_list = qb_client.torrents.info()
+        else:
+            status_filter_string = ",".join(status_filters_list)
+            logger.info(f"Fetching torrents with statuses: '{status_filter_string}'")
+            initial_torrent_list = qb_client.torrents.info(status_filter=status_filter_string)
 
-    initial_torrent_list = []
-    if "all" in [s.lower() for s in status_filters_list]:
-        logger.info("Fetching all torrents from qBittorrent (status filter 'all' specified).")
-        initial_torrent_list = qb_client.torrents.info()
-    else:
-        status_filter_string = ",".join(status_filters_list)
-        logger.info(f"Fetching torrents with statuses: '{status_filter_string}'")
-        initial_torrent_list = qb_client.torrents.info(status_filter=status_filter_string)
+        logger.info(f"Found {len(initial_torrent_list)} torrents matching status filter(s) and will be checked against cache files.")
 
-    logger.info(f"Found {len(initial_torrent_list)} torrents matching status filter(s) and will be checked against cache files.")
+        # Step 3: Find torrents that have files on the cache drive using relative paths
+        torrents_to_pause = find_torrents_with_cache_files(qb_client, initial_torrent_list, all_cache_files_relative, args.user_share_mount)
 
-    # Step 3: Find torrents that have files on the cache drive using relative paths
-    torrents_to_pause = find_torrents_with_cache_files(qb_client, initial_torrent_list, all_cache_files_relative, args.user_share_mount)
+        logger.debug(f"Main function received {len(torrents_to_pause)} torrents to pause from find_torrents_with_cache_files.")
 
-    logger.debug(f"Main function received {len(torrents_to_pause)} torrents to pause from find_torrents_with_cache_files.")
+        if not torrents_to_pause:
+            logger.info("No torrents found with files on the cache drive. Nothing to pause or resume.")
+            if mover_status == "Skipped": # If it was skipped due to no cache files earlier
+                mover_status = "No Torrents to Move"
+        else:
+            # Step 4: Pause identified torrents
+            paused_torrents_count = len(torrents_to_pause)
+            logger.info(f"Pausing [{paused_torrents_count}] torrents with files on the cache drive.")
+            stop_start_torrents(torrents_to_pause, True)
+            time.sleep(5) # Small delay before mover for qBittorrent to settle
 
-    if not torrents_to_pause:
-        logger.info("No torrents found with files on the cache drive. Nothing to pause or move.")
-        mover_status = "No Torrents to Move"
-        return {
-            "status": mover_status,
-            # Removed "output_stdout": mover_output_stdout,
-            "output_stderr": mover_output_stderr,
-            "paused_count": paused_torrents_count
-        }
-
-    # Step 4: Pause identified torrents
-    paused_torrents_count = len(torrents_to_pause)
-    logger.info(f"Pausing [{paused_torrents_count}] torrents with files on the cache drive.")
-    stop_start_torrents(torrents_to_pause, True)
-    time.sleep(5)
-
-    # Step 5: Start Unraid mover
+    # Step 5: Start Unraid mover (this part runs unconditionally)
     mover_command = "/usr/local/sbin/mover" # Always use the default mover command
     logger.info(f"Starting mover using command: {mover_command} start")
     try:
@@ -752,8 +729,10 @@ def run_mover_task(args) -> dict:
         if mover_output_stderr:
             logger.warning(f"Mover output (stderr):\n{mover_output_stderr}")
         
-        mover_status = "Success"
-        logger.info("Mover has finished its operation.")
+        # Only set status to Success if it wasn't already marked as failed/skipped due to qBittorrent issues
+        if "Failed" not in mover_status and "Error" not in mover_status:
+            mover_status = "Success"
+        logger.info("Unraid Mover has finished its operation.")
     except subprocess.CalledProcessError as e:
         # Removed mover_output_stdout assignment
         mover_output_stderr = e.stderr.strip()
@@ -762,20 +741,26 @@ def run_mover_task(args) -> dict:
         # Removed stdout error logging
         if mover_output_stderr:
             logger.error(f"Mover output (stderr):\n{mover_output_stderr}")
-        logger.critical("Mover failed to run. Torrents will still be resumed.")
+        logger.critical("Unraid Mover failed to run.")
     except FileNotFoundError:
         mover_status = "Mover Not Found"
         logger.error(f"Mover command '{mover_command}' not found. Is Unraid installed or path correct?")
-        logger.critical("Mover command not found. Torrents will still be resumed.")
+        logger.critical("Unraid Mover command not found.")
     except Exception as e:
         mover_status = "Mover Error"
         logger.error(f"An unexpected error occurred while running the mover: {e}", exc_info=True)
-        logger.critical("An unexpected error occurred during mover execution. Torrents will still be resumed.")
+        logger.critical("An unexpected error occurred during Unraid Mover execution.")
 
 
-    # Step 6: Resume paused torrents
-    logger.info(f"Resuming [{paused_torrents_count}] torrents that were paused for cache movement.")
-    stop_start_torrents(torrents_to_pause, False)
+    # Step 6: Resume paused torrents (only if qBittorrent was connected)
+    if qb_client and torrents_to_pause:
+        logger.info(f"Resuming [{paused_torrents_count}] torrents that were paused for cache movement.")
+        stop_start_torrents(torrents_to_pause, False)
+    elif qb_client and not torrents_to_pause:
+        logger.info("No torrents were paused, so nothing to resume.")
+    else:
+        logger.warning("Skipping torrent resumption as qBittorrent connection failed previously.")
+        
     logger.info("Mover script operations completed.")
     
     return {
