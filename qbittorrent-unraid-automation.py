@@ -862,11 +862,13 @@ if __name__ == "__main__":
     overall_status_message = ""
     notification_color = 0x00FF00 # Green for success
 
+    # Initialize summary dictionaries for both tasks
+    unregistered_summary = {"deleted": 0, "notified_issues": 0, "system_notif_sent": False, "report_path": None}
+    mover_summary = {"status": "Not Run", "output_stderr": "", "paused_count": 0}
+
     try:
-        # 1. Run the unregistered torrent removal part first
+        # 1. Run the unregistered torrent removal part
         logger.info("--- Starting Unregistered Torrent Removal ---")
-        
-        # Attempt login for the first task
         logged_in_for_unregistered_check = False
         try:
             logged_in_for_unregistered_check = login_qbittorrent(args.host, args.user, args.password)
@@ -882,57 +884,45 @@ if __name__ == "__main__":
                         notification_color = 0xFFA500 # Orange for warnings/minor issues
             else:
                 overall_status_message += "**Unregistered Torrent Removal:** Skipped due to qBittorrent login failure. Please check qBittorrent credentials or connectivity.\n"
-                notification_color = 0xFF0000 # Red for critical errors (login failure)
-                healthchecks_ping_status = "fail" # Mark Healthchecks as failed
+                # Do not set notification_color or healthchecks_ping_status to fail here, as mover might succeed.
+                # This will be handled in the final summary.
                 # No need to call find_and_delete_unregistered_torrents_task if login failed
         except Exception as e:
             logger.critical(f"Critical error during unregistered torrent removal: {e}", exc_info=True)
             overall_status_message += f"**Unregistered Torrent Removal:** Failed with critical error: {e}\n"
-            notification_color = 0xFF0000 # Red for critical errors
-            healthchecks_ping_status = "fail" # Mark Healthchecks as failed
+            # Do not set notification_color or healthchecks_ping_status to fail here.
         finally:
-            # Only try to logout if we successfully logged in
-            # This is already handled inside login_qbittorrent by session.post and session.get
             # The session.get(f'{host}/api/v2/auth/logout') is called in logout_qbittorrent which logs out the requests session
-            pass
+            if logged_in_for_unregistered_check:
+                logout_qbittorrent(args.host) # Ensure logout after the session-based operations
         logger.info("--- Finished Unregistered Torrent Removal ---")
         
         # Add a small delay between the two main operations if desired, e.g., to allow qBittorrent to settle
         time.sleep(10) 
 
-        # 2. Run the mover script part ONLY IF the initial login was successful
-        if logged_in_for_unregistered_check:
-            logger.info("--- Starting qBittorrent Mover ---")
-            mover_summary = {}
-            try:
-                mover_summary = run_mover_task(args)
-                overall_status_message += (
-                    f"\n**Unraid Mover:**\n"
-                    f"- Status: {mover_summary['status']}\n"
-                    f"- Paused Torrents: {mover_summary['paused_count']}\n"
-                )
-                if mover_summary['status'] not in ["Success", "No Torrents to Move", "Skipped"]:
-                    notification_color = 0xFF0000 # Red if mover failed or had issues
-                    healthchecks_ping_status = "fail" # Mark Healthchecks as failed
-                elif mover_summary['status'] == "Success" and notification_color != 0xFF0000:
-                    # Keep original color if it was orange from torrent removal, otherwise set green
-                    if mover_summary['paused_count'] > 0:
-                        notification_color = 0x00FF00
-                    elif unregistered_summary["deleted"] == 0 and unregistered_summary["notified_issues"] == 0:
-                        notification_color = 0x00FF00 # All good, green
-
-                if mover_summary['output_stderr']:
-                    overall_status_message += f"**Mover Output (stderr):**\n```\n{mover_summary['output_stderr'][:1000]}...\n```\n"
-
-            except Exception as e:
-                logger.critical(f"Critical error during qBittorrent Mover process: {e}", exc_info=True)
-                overall_status_message += f"**Unraid Mover:** Failed with critical error: {e}\n"
-                notification_color = 0xFF0000 # Red for critical errors
+        # 2. Run the mover script part unconditionally. Its internal connection logic will handle qBittorrent's state.
+        logger.info("--- Starting qBittorrent Mover ---")
+        try:
+            mover_summary = run_mover_task(args)
+            overall_status_message += (
+                f"\n**Unraid Mover:**\n"
+                f"- Status: {mover_summary['status']}\n"
+                f"- Paused Torrents: {mover_summary['paused_count']}\n"
+            )
+            # Only set notification_color and healthchecks_ping_status here if mover failed
+            if mover_summary['status'] not in ["Success", "No Torrents to Move", "Skipped"]:
+                notification_color = 0xFF0000 # Red if mover failed or had issues
                 healthchecks_ping_status = "fail" # Mark Healthchecks as failed
-            logger.info("--- Finished qBittorrent Mover ---")
-        else:
-            logger.info("--- Skipping qBittorrent Mover due to prior login failure ---")
-            overall_status_message += "\n**Unraid Mover:** Skipped due to previous qBittorrent login failure.\n"
+            
+            if mover_summary['output_stderr']:
+                overall_status_message += f"**Mover Output (stderr):**\n```\n{mover_summary['output_stderr'][:1000]}...\n```\n"
+
+        except Exception as e:
+            logger.critical(f"Critical error during qBittorrent Mover process: {e}", exc_info=True)
+            overall_status_message += f"**Unraid Mover:** Failed with critical error: {e}\n"
+            notification_color = 0xFF0000 # Red for critical errors
+            healthchecks_ping_status = "fail" # Mark Healthchecks as failed
+        logger.info("--- Finished qBittorrent Mover ---")
 
     except Exception as e:
         logger.critical(f"An unhandled critical error occurred during script execution: {e}", exc_info=True)
@@ -944,6 +934,24 @@ if __name__ == "__main__":
 
         script_end_time = datetime.now() # Capture script end time
         script_duration = script_end_time - script_start_time
+
+        # Final determination of overall notification color and Healthchecks.io status
+        # If any major component failed (torrent removal login or mover issues),
+        # the notification_color and healthchecks_ping_status should reflect that.
+        # If mover was 'Success' and torrent removal had no issues or was skipped cleanly, it's green.
+        if (unregistered_summary["deleted"] == 0 and unregistered_summary["notified_issues"] == 0 and not logged_in_for_unregistered_check and "Skipped due to qBittorrent login failure" in overall_status_message) and \
+           (mover_summary['status'] == "Success" or mover_summary['status'] == "No Torrents to Move" or mover_summary['status'] == "Skipped"):
+            notification_color = 0x00FF00 # Green if qBittorrent was down but mover ran or had nothing to do.
+            healthchecks_ping_status = "success"
+
+        # If torrent removal had issues (deleted/notified), but mover was successful, keep it orange.
+        # This logic is already mostly handled, just ensuring it's not inadvertently turned red unless truly a failure.
+        if (unregistered_summary["deleted"] > 0 or unregistered_summary["notified_issues"] > 0) and notification_color != 0xFF0000:
+            notification_color = 0xFFA500
+        
+        # If there was a critical error anywhere, it should already be red.
+        # If Healthchecks.io was marked fail at any point, keep it fail.
+        # This means the final ping reflects the worst-case scenario.
 
         # Send final Discord notification with aggregated summary
         if args.discord_webhook_url:
