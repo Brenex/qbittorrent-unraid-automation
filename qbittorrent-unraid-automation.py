@@ -188,44 +188,34 @@ def cleanup_old_logs():
 def login_qbittorrent(host, username, password, max_retries=3, retry_delay=5) -> bool:
     """
     Attempts to log into the qBittorrent Web UI using requests.Session.
-    Includes a retry mechanism for transient API unresponsiveness.
-
-    Args:
-        host (str): qBittorrent host URL.
-        username (str): qBittorrent username.
-        password (str): qBittorrent password.
-        max_retries (int): Maximum number of login attempts.
-        retry_delay (int): Seconds to wait between attempts.
-
-    Returns:
-        bool: True if login is successful, False otherwise.
+    Includes a retry mechanism for transient API unresponsiveness and 
+    supports qBittorrent 5.2.0+ HTTP 204 auth responses.
     """
     logger.info("Attempting to log into qBittorrent for unregistered torrent check...")
     
     for attempt in range(1, max_retries + 1):
         try:
-            # Added a timeout to prevent the script from hanging on a locked thread
             resp = session.post(
                 f'{host}/api/v2/auth/login', 
                 data={'username': username, 'password': password},
                 timeout=10
             )
             
-            if resp.text == 'Ok.':
+            # Handle both legacy (200 + 'Ok.') and 5.2.0+ (204 + empty body) success responses
+            if (resp.status_code == 200 and resp.text == 'Ok.') or resp.status_code == 204:
                 logger.info("Successfully logged in to qBittorrent (requests session).")
                 return True
-            elif resp.text == 'Fails.':
+            elif resp.text == 'Fails.' or resp.status_code in [401, 403]:
                 logger.error("Login failed: Invalid username or password.")
-                return False  # Do not retry on a hard authentication failure
+                return False
             else:
-                logger.warning(f"Attempt {attempt}/{max_retries} - Unexpected API response: '{resp.text}'.")
+                logger.warning(f"Attempt {attempt}/{max_retries} - Unexpected API response: HTTP {resp.status_code} '{resp.text}'.")
                 
         except requests.exceptions.RequestException as e:
             logger.warning(f"Attempt {attempt}/{max_retries} - Network/Connection error: {e}")
         except Exception as e:
             logger.warning(f"Attempt {attempt}/{max_retries} - Unexpected error: {e}", exc_info=True)
 
-        # Wait before the next retry, but only if we haven't reached the max limit
         if attempt < max_retries:
             logger.info(f"Retrying login in {retry_delay} seconds...")
             time.sleep(retry_delay)
