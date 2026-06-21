@@ -423,7 +423,7 @@ def find_and_delete_unregistered_torrents_task(qb_host: str, discord_webhook: st
             continue
 
         for tracker in trackers:
-            if tracker.get('status') != 4:
+            if tracker.get('status') not in [4, 5]:
                 logger.debug(f"Tracker '{tracker.get('url', 'N/A')}' for '{torrent_name}' has status {tracker.get('status')}, skipping.")
                 continue
 
@@ -447,7 +447,8 @@ def find_and_delete_unregistered_torrents_task(qb_host: str, discord_webhook: st
                 logger.debug(f"Ignoring transient tracker issue for '{torrent_name}': {msg}")
                 continue
 
-            if 'unregistered torrent' in msg_lower or 'torrent does not exist' in msg_lower:
+            # Broaden the acceptable tracker rejection messages
+            if any(term in msg_lower for term in ['unregistered', 'not exist', 'not found', 'not registered', 'unknown torrent']):
                 logger.warning(f"Detected 'unregistered torrent' for '{torrent_name}'. Attempting deletion.")
                 if delete_torrent_by_hash(qb_host, torrent_hash, torrent_name):
                     deleted_entries.append(formatted_info)
