@@ -105,7 +105,6 @@ HEALTHCHECKS_URL = os.getenv('HEALTHCHECKS_URL', '') # Your Healthchecks.io ping
 session = requests.Session()
 # --- CONFIGURATION END ---
 
-
 # --- LOGGING CONFIGURATION START ---
 # Create a logger instance
 logger = logging.getLogger(__name__)
@@ -122,22 +121,36 @@ logger.addHandler(console_handler)
 
 
 def get_logs_dir():
-    """Returns the path to the logs directory, creating it if it doesn't exist."""
+    """
+    Returns the path to the logs directory, creating it if it doesn't exist.
+
+    Returns:
+        str: The absolute path to the logs directory.
+    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     logs_dir = os.path.join(script_dir, 'logs')
     os.makedirs(logs_dir, exist_ok=True)
     return logs_dir
 
-
 def get_current_run_log_file_path():
-    """Generates a timestamped log file path for the current script run."""
+    """
+    Generates a timestamped log file path for the current script run.
+
+    Returns:
+        str: The absolute path for the current run's log file.
+    """
     logs_dir = get_logs_dir()
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     return os.path.join(logs_dir, f'qbittorrent-automation_{timestamp}.log') # Unified log file name
 
 
 def get_unregistered_log_file_path():
-    """Generates a unique file path for the unregistered torrent log."""
+    """
+    Generates a unique file path for the unregistered torrent log.
+
+    Returns:
+        str: The absolute path for the unregistered torrent log file.
+    """
     logs_dir = get_logs_dir()
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     return os.path.join(logs_dir, f'deleted_unregistered_torrents_{timestamp}.log')
@@ -159,7 +172,9 @@ except Exception as e:
 
 
 def cleanup_old_logs():
-    """Deletes log files older than LOG_RETENTION_DAYS."""
+    """
+    Deletes log files older than LOG_RETENTION_DAYS.
+    """
     logs_dir = get_logs_dir()
     cutoff_time = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
 
@@ -183,13 +198,22 @@ def cleanup_old_logs():
 
 # --- LOGGING CONFIGURATION END ---
 
-
 # --- Unregistered Torrent Removal Functions ---
 def login_qbittorrent(host, username, password, max_retries=3, retry_delay=5) -> bool:
     """
     Attempts to log into the qBittorrent Web UI using requests.Session.
     Includes a retry mechanism for transient API unresponsiveness and 
     supports qBittorrent 5.2.0+ HTTP 204 auth responses.
+
+    Args:
+        host (str): The qBittorrent host URL.
+        username (str): The qBittorrent username.
+        password (str): The qBittorrent password.
+        max_retries (int, optional): Maximum number of login attempts. Defaults to 3.
+        retry_delay (int, optional): Delay between retries in seconds. Defaults to 5.
+
+    Returns:
+        bool: True if login is successful, False otherwise.
     """
     logger.info("Attempting to log into qBittorrent for unregistered torrent check...")
     
@@ -223,10 +247,12 @@ def login_qbittorrent(host, username, password, max_retries=3, retry_delay=5) ->
     logger.error("qBittorrent login failed after all retry attempts.")
     return False
 
-
 def logout_qbittorrent(host):
     """
     Logs out of the qBittorrent Web UI using requests.Session.
+
+    Args:
+        host (str): The qBittorrent host URL.
     """
     logger.info("Attempting to log out of qBittorrent (requests session)...")
     try:
@@ -268,7 +294,6 @@ def delete_torrent_by_hash(qb_host: str, torrent_hash: str, torrent_name: str) -
     except Exception as e:
         logger.error(f"An unexpected error occurred while deleting torrent '{torrent_name}': {e}", exc_info=True)
         return False
-
 
 def send_discord_notification_embed(
     webhook_url: str,
@@ -352,7 +377,7 @@ def ping_healthchecks_io(healthchecks_url: str, status: str = ""):
         status (str, optional): Can be "start", "fail", or empty for success.
                                 "https://hc-ping.com/YOUR_UUID/start"
                                 "https://hc-ping.com/YOUR_UUID/fail"
-                                "https://hc-ping.com/YOUR_UUID" (success)
+                                "https://hc-ping.com/YOUR_UUID" (success). Defaults to "".
     """
     if not healthchecks_url:
         logger.debug("Healthchecks.io URL is not configured. Skipping Healthchecks.io ping.")
@@ -375,14 +400,19 @@ def ping_healthchecks_io(healthchecks_url: str, status: str = ""):
     except Exception as e:
         logger.error(f"An unexpected error occurred while pinging Healthchecks.io: {e}", exc_info=True)
 
-
 def find_and_delete_unregistered_torrents_task(qb_host: str, discord_webhook: str) -> dict:
     """
     Fetches torrent information from qBittorrent, identifies torrents with
     'unregistered torrent' tracker status messages, deletes them, and
     notifies about other failing tracker issues.
     Generates a detailed log report.
-    Returns a dictionary of summary statistics.
+    
+    Args:
+        qb_host (str): The qBittorrent host URL.
+        discord_webhook (str): The Discord webhook URL for notifications.
+
+    Returns:
+        dict: A dictionary of summary statistics containing keys 'deleted', 'notified_issues', 'system_notif_sent', and 'report_path'.
     """
     logger.info("Starting scan for unregistered and failing torrents...")
     deleted_count = 0
@@ -510,10 +540,18 @@ def find_and_delete_unregistered_torrents_task(qb_host: str, discord_webhook: st
         "report_path": report_file
     }
 
-
 # --- Mover Script Functions ---
 def strip_prefix(path, prefix):
-    """Strips a given prefix from a path if it starts with that prefix."""
+    """
+    Strips a given prefix from a path if it starts with that prefix.
+
+    Args:
+        path (str): The full path string.
+        prefix (str): The prefix string to remove from the path.
+
+    Returns:
+        str: The stripped path.
+    """
     norm_path = os.path.normpath(path)
     norm_prefix = os.path.normpath(prefix)
 
@@ -534,6 +572,13 @@ def get_all_cache_files_relative(cache_mount_path, ignore_folders):
     Recursively scans the cache mount path and returns a set of all relative file paths found.
     Paths are normalized and stripped of the cache_mount_path prefix.
     Folders listed in ignore_folders will be skipped.
+
+    Args:
+        cache_mount_path (str): The absolute path to the cache mount.
+        ignore_folders (list): A list of absolute folder paths to ignore during scanning.
+
+    Returns:
+        set: A set containing all relative file paths found on the cache drive.
     """
     logger.info(f"Scanning cache mount: {cache_mount_path} and stripping prefix.")
     if ignore_folders:
@@ -589,11 +634,19 @@ def get_all_cache_files_relative(cache_mount_path, ignore_folders):
     logger.info(f"Found {len(cache_files_relative)} relative file paths on the cache drive.")
     return cache_files_relative
 
-
 def find_torrents_with_cache_files(client, torrent_list, cache_files_set_relative, user_share_mount_path):
     """
     Identifies torrents that have at least one file residing on the cache drive
     by comparing relative paths.
+
+    Args:
+        client (Client): The active qBittorrentAPI client instance.
+        torrent_list (list): A list of torrent objects to check.
+        cache_files_set_relative (set): A set of relative file paths present on the cache.
+        user_share_mount_path (str): The path to the Unraid user share.
+
+    Returns:
+        list: A list of torrent objects that have files on the cache drive.
     """
     torrents_to_pause = []
 
@@ -643,7 +696,13 @@ def find_torrents_with_cache_files(client, torrent_list, cache_files_set_relativ
 
 
 def stop_start_torrents(torrent_list, pause=True):
-    """Pauses or resumes a list of torrents."""
+    """
+    Pauses or resumes a list of torrents.
+
+    Args:
+        torrent_list (list): A list of qBittorrentAPI torrent objects.
+        pause (bool, optional): If True, pauses the torrents. If False, resumes them. Defaults to True.
+    """
     action = "Pausing" if pause else "Resuming"
     for torrent in torrent_list:
         logger.info(f"{action}: {torrent.name}")
@@ -655,11 +714,15 @@ def stop_start_torrents(torrent_list, pause=True):
         except Exception as e:
             logger.error(f"Failed to {action.lower()} torrent '{torrent.name}': {e}", exc_info=True)
 
-
 def run_mover_task(args) -> dict:
     """
     Executes the Unraid mover process.
-    Returns a dictionary of mover execution statistics.
+
+    Args:
+        args (argparse.Namespace): The parsed command-line arguments.
+
+    Returns:
+        dict: A dictionary of mover execution statistics containing 'status', 'output_stderr', and 'paused_count'.
     """
     logger.info("Starting mover script operations.")
     mover_status = "Skipped"
@@ -791,7 +854,6 @@ def run_mover_task(args) -> dict:
         "paused_count": paused_torrents_count
     }
 
-
 if __name__ == "__main__":
     script_start_time = datetime.now() # Capture script start time
     
@@ -921,7 +983,8 @@ if __name__ == "__main__":
                 healthchecks_ping_status = "fail" # Mark Healthchecks as failed
             
             if mover_summary['output_stderr']:
-                overall_status_message += f"**Mover Output (stderr):**\n```\n{mover_summary['output_stderr'][:1000]}...\n```\n"
+                # Note: Using hex escapes (\x60) for backticks inside the f-string prevents markdown parsing errors in the output block
+                overall_status_message += f"**Mover Output (stderr):**\n\x60\x60\x60\n{mover_summary['output_stderr'][:1000]}...\n\x60\x60\x60\n"
 
         except Exception as e:
             logger.critical(f"Critical error during qBittorrent Mover process: {e}", exc_info=True)
@@ -935,6 +998,7 @@ if __name__ == "__main__":
         overall_status_message += f"\n**Overall Script Status:** Unhandled Critical Error: {e}\n"
         notification_color = 0xFF0000 # Red for critical errors
         healthchecks_ping_status = "fail" # Mark Healthchecks as failed
+
     finally:
         logger.info("All automation tasks completed.")
 
