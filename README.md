@@ -54,17 +54,6 @@ Preview first. The example assumes Docker maps host `/mnt/user/data` to containe
 
 The recovery record survives a killed process. Keep the state directory on persistent storage. If a timeout or external interruption left the Mover status unclear, verify the actual Mover has stopped before running recovery.
 
-## Tracker URL migration
-
-Set `QBT_TRACKER_OLD_URL` and `QBT_TRACKER_NEW_URL` in `.env`, using the full announce URLs. For URLs containing `#` or spaces, use appropriate dotenv quoting.
-
-```bash
-.venv/bin/python migrate_tracker.py
-.venv/bin/python migrate_tracker.py --apply
-```
-
-The first command previews exact matches. Applying edits verifies each updated torrent and stops if it encounters a conflict or error. Completed edits remain applied. Preview again before retrying. The tool logs tracker hostnames only.
-
 ## Scheduling and notifications
 
 - Run audit and Mover as separate jobs. Use separate Healthchecks ping URLs via each job's environment or `--healthchecks-url`. An unsuccessful operation exits nonzero and sends `/fail` when configured. A duplicate invocation exits nonzero without replacing the running job's health signal. A notification delivery failure is logged separately.
