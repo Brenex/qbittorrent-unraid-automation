@@ -1,157 +1,78 @@
-# qbittorrent-unraid-automation
+# qBittorrent and Unraid maintenance
 
-## Table of Contents
+Run the Python scripts on the **Unraid host**, where they can see the mounted pools and invoke the installed Mover. qBittorrent can stay in its existing Docker container. The scripts communicate with its WebUI over HTTP(S).
 
-- [Overview](https://gemini.google.com/app/#overview "null")
-- [Features](https://gemini.google.com/app/#features "null")
-- [Prerequisites](https://gemini.google.com/app/#prerequisites "null")
-- [Installation](https://gemini.google.com/app/#installation "null")
-	- [Dependencies](https://gemini.google.com/app/#dependencies "null")
-	- [Environment Variables (.env)](https://gemini.google.com/app/#environment-variables-env "null")
-- [Usage](https://gemini.google.com/app/#usage "null")
-	- [Command-Line Arguments](https://gemini.google.com/app/#command-line-arguments "null")
-	- [Example Usage](https://gemini.google.com/app/#example-usage "null")
-- [Logging](https://gemini.google.com/app/#logging "null")
-- [Discord Notifications](https://gemini.google.com/app/#discord-notifications "null")
-- [Troubleshooting](https://gemini.google.com/app/#troubleshooting "null")
+## Install
 
-## Overview
+Extract this package into a new directory. Keep all its Python files together. Use Python 3.10 or later on Linux.
 
-This Python script automates two critical maintenance tasks for users running qBittorrent on an Unraid server: removing unregistered torrents and managing the Unraid mover process. It is designed to streamline media server management by ensuring data integrity and optimizing storage utilization, providing comprehensive logging and rich Discord notifications.
-
-## Features
-
-1. **Unregistered Torrent Removal:**
-	- Connects to the qBittorrent Web UI to retrieve torrent information.
-	- Identifies and deletes torrents that report an 'unregistered torrent' status from their trackers, removing both the torrent entry and its associated files from the system.
-	- Logs other instances of failing tracker issues for monitoring, and sends a system notification to Unraid for these.
-	- Generates a detailed log report of deleted torrents and other tracker issues.
-2. **Unraid Mover Automation:**
-	- Scans the Unraid cache drive to identify files that are part of active qBittorrent torrents.
-	- Temporarily pauses these identified torrents in qBittorrent to prevent issues during data movement.
-	- Executes the Unraid mover (`/usr/local/sbin/mover`) to transfer files from the cache drive to the array.
-	- Resumes the paused torrents once the mover operation is complete.
-	- Includes logic to strip FUSE filesystem mount points for accurate path comparison and allows specific cache folders (e.g., `appdata`) to be ignored during the scan.
-3. **Comprehensive Logging & Notifications:**
-	- Maintains detailed logs of its operations to both console output and timestamped log files.
-	- Implements log file retention, automatically cleaning up old logs.
-	- Sends rich Discord notifications at the start and end of the script execution, including timestamps and duration.
-	- Provides a summary Discord notification after all main tasks (torrent removal and mover) are complete, detailing actions taken, status of operations, and attaching the main script log file.
-	- Configuration for qBittorrent connection details and Discord webhook URL is loaded from a `.env` file, supporting secure and flexible deployment.
-
-## Prerequisites
-
-- **Python 3.x:** The script requires Python 3.
-- **qBittorrent:** A running qBittorrent instance with Web UI enabled.
-- **Unraid OS:** The script is specifically designed for Unraid servers, utilizing the `/usr/local/sbin/mover` and `/usr/local/emhttp/plugins/dynamix/scripts/notify` commands.
-- **Discord Webhook (Optional):** For Discord notifications.
-
-## Installation
-
-### Dependencies
-
-Install the required Python packages using `pip`:
-
-```
-pip install -r requirements.txt
+```bash
+cd /mnt/user/scripts/qbittorrent-unraid-automation
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+(umask 077 && cp -n .env.example .env)
+chmod 600 .env
 ```
 
-The `requirements.txt` file should contain:
+Set `QB_HOST`, `QB_USER`, and `QB_PASSWORD` in `.env`. The scripts load the file relative to their own location. Environment variables already set by a scheduled job take precedence. Use the full interpreter and script paths in Unraid User Scripts so the working directory does not matter. If you reuse the previous installation directory, review old log and report files for credentials, and remove the old credential-bearing `remove.py` from the deployment. Rotate the previously embedded password and tracker passkey if they were live.
 
-```
-requests
-qbittorrentapi
-python-dotenv
-```
+## Audit and prune
 
-### Environment Variables (.env)
-
-For secure and flexible configuration, the script loads sensitive information from a `.env` file. Create a file named `.env` in the same directory as the script and populate it with your details:
-
-```
-# qBittorrent Web UI Access
-QB_HOST=http://your_qbittorrent_ip:port # e.g., http://192.168.1.100:8080 or http://unraid:8080
-QB_USER=your_qb_username
-QB_PASSWORD=your_qb_password
-
-# Discord Notifications (Optional)
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN
+```bash
+.venv/bin/python qbittorrent-unraid-automation.py audit
+.venv/bin/python qbittorrent-unraid-automation.py prune
+.venv/bin/python qbittorrent-unraid-automation.py prune --apply
 ```
 
-**Note:** Ensure `QB_HOST` includes the `http://` or `https://` schema. The script will attempt to prepend `http://` if missing, but it's best practice to include it explicitly.
+- `audit` is the default. It reports tracker issues and records observations locally. `prune` without `--apply` previews the confirmed candidates. Both may send notifications if configured.
+- Before pruning, set `TRACKER_REJECTIONS_JSON` in `.env` using the actual tracker hostname and exact torrent-level rejection messages. Matching ignores case and outer whitespace. Confirm that each configured phrase means **the torrent hash is unregistered** on that tracker. Account, passkey, timeout, and generic server errors are unsuitable. The example is intentionally inactive.
+- Every real tracker must explicitly reject the torrent. A healthy, unknown, unreachable, updating, or unconfigured tracker blocks removal. A failed scan clears its accumulated evidence. The same evidence must be observed on separate successful runs at least one hour apart by default, with a seven-day maximum history. qBittorrent may return cached tracker status. Use `--confirmation-hours` to set an interval longer than the normal announce interval if needed.
+- `prune --apply` rechecks each candidate immediately before removing its torrent entry. Add `--delete-files` only when you also want qBittorrent to delete the download payload. If another torrent or application references the exact same pathname, that reference may lose access to the file. Payload deletion is delegated to qBittorrent.
+- A failed or ambiguous deletion exits with an error. An attempted candidate must build fresh confirmation history before automatic removal can be tried again.
 
-## Usage
+## Mover
 
-Run the script from your Unraid server's terminal or via a scheduled task (e.g., User Scripts plugin).
+Preview first. The example assumes Docker maps host `/mnt/user/data` to container `/data`, and the relevant pool is mounted at `/mnt/cache`.
 
-```
-python3 /path/to/your/script/qbittorrent-unraid-automation.py --cache-mount /mnt/cache --user-share-mount /mnt/user
-```
+```bash
+.venv/bin/python qbittorrent-unraid-automation.py mover --dry-run \
+  --cache-mount /mnt/cache --qb-path-map /data=/mnt/user/data
 
-### Command-Line Arguments
-
-The script supports the following command-line arguments:
-
-- `--host <URL>`: qBittorrent host including port (e.g., `http://localhost:8080`). Defaults to `QB_HOST` from `.env`.
-- `-u <USERNAME>`, `--user <USERNAME>`: qBittorrent username. Defaults to `QB_USER` from `.env`.
-- `-p <PASSWORD>`, `--password <PASSWORD>`: qBittorrent password. Defaults to `QB_PASSWORD` from `.env`.
-- `--cache-mount <PATH>`: **(Required)** Cache mount point in Unraid (e.g., `/mnt/cache`). Used to scan for files. This path will be stripped during comparison.
-- `--user-share-mount <PATH>`: **(Required)** User share mount point in Unraid (e.g., `/mnt/user`). This path will be stripped from torrent file paths for comparison.
-- `--status-filter <STATUS_LIST>`: Comma-separated list of qBittorrent statuses to filter torrents for mover operations. E.g., `'downloading,seeding,completed'`. Use `'all'` to check all torrents. Default: `'uploading,queuedUP,stalledUP,stalledDL,completed'`.
-- `--ignore-cache-folders <PATH_LIST>`: Comma-separated list of absolute paths on the cache drive to ignore during scanning. E.g., `'/mnt/cache/appdata,/mnt/cache/system'`. Default: `""` (empty).
-- `--discord-webhook-url <URL>`: Discord webhook URL for notifications. Overrides the value from the `.env` file. Defaults to `DISCORD_WEBHOOK_URL` from `.env`.
-
-### Example Usage
-
-To run the script with default credentials from `.env` and specific mount points:
-
-```
-python3 /mnt/user/scripts/qbittorrent-unraid-automation/qbittorrent-unraid-automation.py \
-    --cache-mount /mnt/cache \
-    --user-share-mount /mnt/user
+.venv/bin/python qbittorrent-unraid-automation.py mover \
+  --cache-mount /mnt/cache --qb-path-map /data=/mnt/user/data
 ```
 
-To run with overridden qBittorrent credentials and ignore a specific appdata folder:
+- Substitute your actual Docker bind mount. Repeat `--qb-path-map` for additional mappings. If qBittorrent already reports `/mnt/user/…` paths, omit that mapping. Repeat `--cache-mount` for every mounted pool Mover may access for qBittorrent shares. If qBittorrent uses a different location for incomplete downloads, map that path too.
+- The script looks up each running torrent's files, checks for corresponding files on the configured pools, and stops matching torrents. It verifies the stopped state before launching Mover, then verifies that Mover is idle before restoring the torrents it stopped. Already-stopped torrents are left alone. `--status-filter` is applied locally and defaults to `all`. A matching cache torrent outside a narrower filter blocks the run. `--ignore-cache-folders` affects the torrent scan only. Mover follows the share settings in Unraid.
+- The default uses `/usr/local/sbin/mover status` and `/usr/local/sbin/mover start`. Run the dry run to verify the installed Mover's status interface. If your release or plugin reports status differently, supply `--mover-status-command /absolute/path/to/helper`. The executable must return **0** for idle, **1** for active, and **2 or higher** if it cannot tell. It must cover the actual move, including any background workers. If needed, set `--mover-command` to a compatible executable that accepts `start`. The script exits before launching if the preflight status is unrecognized.
+- Schedule this as the sole Mover launcher for the relevant pools, and avoid simultaneous manual changes to torrent state. The lock coordinates these scripts when they share the same `--state-dir`. It cannot lock Unraid's own scheduler, the qBittorrent UI, or another deployment with a different state directory. Other applications can still hold files open. Mover completion indicates that the command finished and the mover is idle. Check Unraid's system log to determine which files moved.
+- If the job is interrupted or cannot verify completion, check Unraid and run recovery. It uses the same status command and state directory as the original run.
 
+```bash
+.venv/bin/python qbittorrent-unraid-automation.py mover --recover
 ```
-python3 /mnt/user/scripts/qbittorrent-unraid-automation/qbittorrent-unraid-automation.py \
-    --host http://192.168.1.50:8080 \
-    -u myuser -p mysecurepassword \
-    --cache-mount /mnt/cache \
-    --user-share-mount /mnt/user \
-    --ignore-cache-folders /mnt/cache/appdata/plex
+
+The recovery record survives a killed process. Keep the state directory on persistent storage. If a timeout or external interruption left the Mover status unclear, verify the actual Mover has stopped before running recovery.
+
+## Tracker URL migration
+
+Set `QBT_TRACKER_OLD_URL` and `QBT_TRACKER_NEW_URL` in `.env`, using the full announce URLs. For URLs containing `#` or spaces, use appropriate dotenv quoting.
+
+```bash
+.venv/bin/python migrate_tracker.py
+.venv/bin/python migrate_tracker.py --apply
 ```
 
-## Logging
+The first command previews exact matches. Applying edits verifies each updated torrent and stops if it encounters a conflict or error. Completed edits remain applied. Preview again before retrying. The tool logs tracker hostnames only.
 
-The script logs its operations to both standard output (console) and a timestamped log file within a `logs/` subdirectory relative to the script's location.
+## Scheduling and notifications
 
-Log files are automatically cleaned up, with files older than `LOG_RETENTION_DAYS` (default 7 days) being removed.
+- Run audit and Mover as separate jobs. Use separate Healthchecks ping URLs via each job's environment or `--healthchecks-url`. An unsuccessful operation exits nonzero and sends `/fail` when configured. A duplicate invocation exits nonzero without replacing the running job's health signal. A notification delivery failure is logged separately.
+- Logs are retained for seven days under `logs/`. Tracker failure reports contain torrent names, tracker hostnames, and status codes. Discord attachments are off by default. Set `DISCORD_ATTACH_LOG=true` to include the sanitized log in the final notification. The attachment still includes torrent names.
+- Set `DISCORD_WEBHOOK_URL` for optional start and result messages. Tracker scan warnings also generate at most one Unraid notification per run.
 
-## Discord Notifications
+## References
 
-The script sends rich embed notifications to a specified Discord webhook URL for key events:
-
-- **Script Start:** A blue informational embed indicating the script has begun, including the start time.
-- **Overall Report:** A comprehensive summary embed after both torrent removal and mover tasks are complete.
-	- **Green:** Indicates overall success or no issues found.
-	- **Orange:** Indicates minor issues (e.g., unregistered torrents deleted or other tracker issues found) but no critical failures.
-	- **Red:** Indicates critical errors or failures during either the torrent removal or mover process.
-	- This embed will include a summary of deleted torrents, other tracker issues, mover status, and mover `stderr` output if available. The main script log file will be attached.
-- **Script End:** A blue informational embed indicating the script has finished, including the end time and total duration.
-
-## Troubleshooting
-
-- **`InvalidSchema: No connection adapters were found for '...'`**: This means the qBittorrent host URL is missing `http://` or `https://`. Ensure your `QB_HOST` in `.env` or `--host` argument includes the full schema.
-- **`requests.exceptions.HTTPError: 401 Client Error: Unauthorized`**: Your qBittorrent username or password is incorrect. Verify your `QB_USER` and `QB_PASSWORD` in `.env` or your command-line arguments.
-- **`qbittorrentapi.exceptions.LoginFailed` / `APIConnectionError`**: The script could not connect or log in to qBittorrent. Check the host URL, port, network connectivity, and qBittorrent Web UI status.
-- **`Mover command failed with exit code 1`**: The Unraid mover command itself encountered an error.
-	- **SSH into your Unraid server** and manually run `/usr/local/sbin/mover start` to see the exact error message.
-	- Check your Unraid system logs for more details.
-	- Ensure your Unraid array is healthy and there's sufficient disk space.
-	- Confirm the mover isn't already running.
-- **`FileNotFoundError: notify`**: The Unraid system notification script (`/usr/local/emhttp/plugins/dynamix/scripts/notify`) was not found. This path is standard for Unraid; verify your Unraid installation or script's execution environment.
-- **Discord notifications not appearing**:
-	- Double-check your `DISCORD_WEBHOOK_URL` in `.env` or as a command-line argument for correctness.
-	- Ensure the Discord channel where the webhook is configured has appropriate permissions.
-	- Check the script's logs for any `Discord HTTP Error` messages.
+- [qBittorrent WebUI API](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-5.0))
+- [qBittorrent Web API changelog](https://github.com/qbittorrent/qBittorrent/blob/master/WebAPI_Changelog.md)
+- [Unraid cache pools and Mover](https://docs.unraid.net/unraid-os/using-unraid-to/manage-storage/cache-pools/)
