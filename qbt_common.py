@@ -145,10 +145,7 @@ class WebAPI:
 
     def __enter__(self):
         try:
-            response = self.request("POST", "auth/login",
-                                    data={"username": self.user, "password": self.password})
-            if response.status_code != 204 and response.text.strip() != "Ok.":
-                raise OperationError("qBittorrent login was rejected.")
+            self._login()
             version = self.request("GET", "app/webapiVersion").text.strip()
             if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", version):
                 raise OperationError("qBittorrent returned an invalid Web API version.")
@@ -167,15 +164,32 @@ class WebAPI:
         finally:
             self.session.close()
 
+    def _login(self):
+        response = self.request("POST", "auth/login",
+                                data={"username": self.user, "password": self.password})
+        if response.status_code != 204 and response.text.strip() != "Ok.":
+            raise OperationError("qBittorrent login was rejected.")
+
     def request(self, method, endpoint, **kwargs):
-        try:
-            response = self.session.request(method, f"{self.base}/api/v2/{endpoint}",
-                                            timeout=TIMEOUT, allow_redirects=False, **kwargs)
-        except requests.RequestException as exc:
-            raise OperationError(f"{endpoint}: {type(exc).__name__}.") from None
-        if response.status_code not in (200, 204):
-            raise OperationError(f"{endpoint}: HTTP {response.status_code}.")
-        return response
+        for attempt in range(2):
+            try:
+                response = self.session.request(method, f"{self.base}/api/v2/{endpoint}",
+                                                timeout=TIMEOUT, allow_redirects=False, **kwargs)
+            except requests.RequestException as exc:
+                # A transport failure may follow a successful mutation. Leave
+                # recovery to the journal instead of replaying an uncertain request.
+                raise OperationError(f"{endpoint}: {type(exc).__name__}.") from None
+            if (response.status_code in (401, 403) and attempt == 0
+                    and not endpoint.startswith("auth/")):
+                LOG.warning("qBittorrent rejected the API session (HTTP %s); reauthenticating and retrying once.",
+                            response.status_code)
+                response.close()
+                self.session.cookies.clear()
+                self._login()
+                continue
+            if response.status_code not in (200, 204):
+                raise OperationError(f"{endpoint}: HTTP {response.status_code}.")
+            return response
 
     def get_json(self, endpoint, **params):
         try:
